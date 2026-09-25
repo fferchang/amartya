@@ -1,0 +1,12 @@
+# Esta carpeta es autocontenida a propósito: se publica sola, como repo aparte,
+# para UMA NET. Por eso lleva su propio .gitignore aunque el de la raíz de
+# Amartya ya cubra lo mismo.
+
+# Lo que compila PlatformIO. Se regenera solo.
+.pio/
+
+# WiFi, token y URL del servidor. NUNCA se sube.
+include/config.local.h
+
+# Archivos que VS Code genera por máquina.
+.vscode/

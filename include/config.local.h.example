@@ -1,0 +1,21 @@
+// Copiar este archivo a config.local.h (en esta misma carpeta) y completarlo.
+// config.local.h está en el .gitignore: tiene la contraseña del WiFi y el token
+// del servidor, y no puede terminar en el repo.
+#pragma once
+
+// La red WiFi. El C3 solo habla 2,4 GHz: si el router tiene las dos bandas con
+// el mismo nombre suele andar igual, pero una red solo de 5 GHz no la ve nunca.
+#define WIFI_SSID "nombre-de-la-red"
+#define WIFI_PASS "contraseña"
+
+// A dónde se manda cada lectura (un POST con el JSON). Si el servidor está en
+// una PC de la misma red, va su IP: NO sirve 127.0.0.1 ni localhost, que desde
+// el ESP32 son el propio ESP32. Ojo si la placa se conecta al hotspot de la PC:
+// ahí la PC suele ser 192.168.137.1 y no la IP que tiene en la red de la casa.
+#define API_URL "http://192.168.0.10:8000/api/lectura"
+
+// El token que espera el servidor. Viaja como "Authorization: Bearer <token>".
+#define API_TOKEN "pegar-el-token-aca"
+
+// Cómo se identifica este nodo. Va en cada lectura como `node_id`.
+#define NODE_ID "cisterna-1"
