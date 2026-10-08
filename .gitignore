@@ -5,7 +5,7 @@
 # Lo que compila PlatformIO. Se regenera solo.
 .pio/
 
-# WiFi, token y URL del servidor. NUNCA se sube.
+# WiFi y credenciales del broker. NUNCA se sube.
 include/config.local.h
 
 # Archivos que VS Code genera por máquina.

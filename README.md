@@ -2,85 +2,102 @@
 
 Firmware del nodo que mide el nivel de agua de una cisterna: un **ESP32-C3
 SuperMini** con un sensor ultrasónico estanco **JSN-SR04T** montado en la tapa.
-El nodo mide la distancia hasta el agua y la manda por WiFi, como JSON, a un
-servidor.
+El nodo mide la distancia hasta el agua, la convierte en porcentaje con la
+calibración del tanque y la publica por **MQTT sobre TLS**, una vez por minuto.
 
-> **Estado: prototipo probado con el sensor real.** Mide y publica de punta a
-> punta. Todavía no es el firmware definitivo: publica cada 5 segundos (un ritmo
-> de prueba), no guarda lecturas si se corta el WiFi y habla HTTP plano. El
-> transporte definitivo se acuerda con UMA NET.
+> **Estado: prototipo para el primer montaje.** Alimentado por fuente y con el
+> WiFi del lugar. Mide solo nivel: no tiene sensor de temperatura ni mide
+> batería. Batería, panel solar y enlace para sitios sin WiFi quedan para otra
+> iteración.
 
 ## El dato que publica el nodo
 
-Cada lectura es un objeto JSON:
+Un número por minuto en el tópico **`sensores/<sitio>/nivel`**, como texto
+plano (`62.4`), con **QoS 0 y sin retain**: el nivel de agua en % de la
+**altura** útil del tanque, entre 0 y 100, con un decimal. No lleva hora ni ID:
+la hora la pone quien recibe y el sitio va en el tópico. Es el formato que
+confirmó UMA NET para la primera etapa.
+
+**Sin un nivel creíble no se publica nada.** Con `sin_eco` o `zona_ciega` (ver
+abajo) en texto plano no hay dónde decir "no sé", así que ese minuto queda como
+hueco. El costo: del otro lado, un sensor roto se ve igual que un nodo apagado.
+
+### La variante en JSON
+
+UMA NET ofreció armar más adelante una versión en JSON para sumar sensores. El
+nodo ya la tiene: con `PUBLICAR_JSON` en `true` (en `src/pipeline_mqtt.ino`)
+publica un JSON por minuto en **`sensores/<sitio>/lectura`**, que sí puede
+decir por qué no hay nivel:
 
 ```json
-{
-  "node_id": "cisterna-1",
-  "timestamp_unix": 1790292145,
-  "valid": true,
-  "distance_cm": 73.6,
-  "rssi_dbm": -47
-}
+{ "estado": "ok", "nivel_pct": 62.4, "distancia_cm": 48.9, "rssi_dbm": -47 }
 ```
 
 | campo | tipo | qué es |
 |---|---|---|
-| `node_id` | texto | quién mide. Se configura en `NODE_ID` |
-| `timestamp_unix` | entero | cuándo se midió, en segundos UTC, con la hora de NTP (ver la regla 4) |
-| `valid` | booleano | si el ultrasónico devolvió eco |
-| `distance_cm` | número, 1 decimal | distancia desde la cara del sensor hasta el agua: la mediana de ~20 disparos. **No viene** si `valid` es `false` |
+| `estado` | texto | `ok`, `zona_ciega` o `sin_eco` (ver abajo) |
+| `nivel_pct` | número, 1 decimal | nivel de agua en % de la **altura** útil del tanque, entre 0 y 100. **Solo viene si `estado` es `ok`** |
+| `distancia_cm` | número, 1 decimal | distancia medida desde la cara del sensor hasta el agua: la mediana de los disparos de los últimos ~16 s. No viene si `estado` es `sin_eco` |
 | `rssi_dbm` | entero | señal WiFi del nodo, para diagnóstico |
 
-Cuando el sensor no recibe eco, la lectura viaja igual, sin `distance_cm`:
+Los otros dos estados:
 
 ```json
-{ "node_id": "cisterna-1", "timestamp_unix": 1790292150, "valid": false, "rssi_dbm": -47 }
+{ "estado": "zona_ciega", "distancia_cm": 20.4, "rssi_dbm": -47 }
+{ "estado": "sin_eco", "rssi_dbm": -47 }
 ```
-
-El formato ya prevé `temperature_c` y `humidity_pct` para un nodo con sensor de
-clima. Este no los manda: una magnitud que no se mide es una clave que no está.
 
 ### Cuatro reglas para quien recibe el dato
 
-1. **Una clave que no está es "no se midió"; nunca es `0`.** Cero centímetros
-   hasta el agua es tanque **lleno**: un sensor roto que mandara `0` se vería
-   como la mejor noticia posible.
-2. **`valid: false` es "no sé", no "vacío".** Sin eco puede ser un cable
-   suelto, el sensor roto o un tanque más hondo que el alcance del sensor. Se
-   muestra como una falla del equipo, no como un nivel de agua.
-3. **El nodo manda distancia, no porcentaje.** El nivel depende de la geometría
-   de cada tanque, y así cambiar de tanque no obliga a reprogramar un equipo que
-   está arriba de una cisterna. La cuenta, del lado de quien recibe:
+1. **Una clave que no está es "no se midió"; nunca es `0`.** 0% es tanque
+   vacío: un sensor roto que mandara `0` dispararía una alarma falsa.
+2. **`sin_eco` es "no sé", no "vacío".** Puede ser un cable suelto, el sensor
+   roto o un tanque más hondo que el alcance del sensor. Se muestra como una
+   falla del equipo, no como un nivel de agua.
+3. **`zona_ciega` tampoco es "lleno".** Con algo a menos de 25 cm, el sensor no
+   avisa que no puede medir: devuelve unos 20 cm, que convertidos darían 100%.
+   El nodo lo detecta y no manda nivel. Si pasa seguido, hay algo delante de la
+   sonda (condensación, una telaraña) o el agua subió más de lo previsto.
+4. **Un minuto sin mensaje es un hueco**, no un valor. El nodo no guarda
+   lecturas para reenviarlas: si el WiFi o el broker no están, esa lectura se
+   pierde.
 
-   ```
-   nivel % = (dist_fondo − distance_cm) / (dist_fondo − dist_lleno) × 100
-   ```
-
-   recortada entre 0 y 100. Las dos distancias se miden desde la cara del
-   sensor: hasta el fondo, y hasta el agua con el tanque lleno. `dist_lleno` no
-   puede ser menor que 25 cm (ver *Montaje*).
-4. **Un `timestamp_unix` anterior al 1/1/2020 es un reloj sin sincronizar, no
-   una fecha.** Pasa en los primeros segundos después de un reinicio, antes de
-   que NTP conteste: el nodo manda los segundos desde que arrancó. Quien recibe
-   tiene que fechar esa lectura con la hora de llegada, y no tirarla. Si prefiere
-   fechar todas las lecturas por su cuenta, puede ignorar el campo.
-
-### Cómo viaja
-
-Un `POST` a la dirección de `API_URL`, con estos encabezados:
+### Cómo se calcula el nivel
 
 ```
-Content-Type: application/json
-Authorization: Bearer <API_TOKEN>
+nivel % = (DIST_FONDO_CM − distancia_cm) / (DIST_FONDO_CM − DIST_LLENO_CM) × 100
 ```
 
-| respuesta | qué hace el nodo |
+recortado entre 0 y 100. Las dos distancias de calibración se miden desde la
+cara del sensor: hasta el fondo, y hasta el agua con el tanque lleno. Son de
+cada tanque y viven en el firmware, así que **cambiar de tanque es volver a
+flashear**. Y en texto plano, si la calibración resulta estar mal, la historia
+ya guardada no se puede corregir: por eso la variante JSON manda también
+`distancia_cm`, con la que sí se puede recalcular.
+
+Es porcentaje de **altura**, no de volumen. Los dos coinciden solo si el tanque
+tiene la misma sección de arriba abajo (cilindro parado o prisma). Para un
+tanque acostado o cónico hace falta una tabla de conversión, del lado de quien
+recibe.
+
+## Configuración
+
+Todo lo de cada instalación está en `include/config.local.h` (se copia de
+`config.local.h.example`, y está en el `.gitignore` porque tiene contraseñas):
+
+| constante | qué es |
 |---|---|
-| `201` | la da por aceptada |
-| `429` | espera lo que diga `Retry-After` (en segundos; 10 si no viene) antes del próximo envío |
-| `400`, `401`, `403` u otra | lo informa por el monitor serie y sigue con la próxima lectura |
-| ninguna (no conecta, o conecta y no contesta en 1,5 s) | lo mismo. La lectura se pierde: no hay buffer |
+| `WIFI_SSID`, `WIFI_PASS` | la red del lugar. Solo 2,4 GHz |
+| `MQTT_HOST`, `MQTT_PORT` | el broker. HiveMQ Cloud: el host del cluster y `8883` |
+| `MQTT_TLS` | `1` para el broker real. `0` solo para probar contra un broker local sin cifrar |
+| `MQTT_USER`, `MQTT_PASS` | las credenciales del broker |
+| `SITIO` | va en el tópico. Sin espacios, acentos ni barras |
+| `DIST_FONDO_CM`, `DIST_LLENO_CM` | la calibración del tanque, en cm. Si `DIST_LLENO_CM` es menor que 25, no compila |
+
+El certificado con el que se valida al broker (ISRG Root X1, la raíz de Let's
+Encrypt, que usa HiveMQ Cloud) va en el código: es público y vence en 2035. Si
+el broker usara otra raíz, la conexión falla con un error de TLS en el monitor
+(ver *Si algo no anda*).
 
 ## Hardware
 
@@ -131,8 +148,7 @@ Hace falta [PlatformIO](https://platformio.org/): la extensión de VS Code o la
 línea de comandos.
 
 1. Copiar `include/config.local.h.example` a `include/config.local.h` y
-   completarlo: la red WiFi (solo 2,4 GHz), `API_URL`, `API_TOKEN` y `NODE_ID`.
-   Ese archivo está en el `.gitignore` porque tiene contraseñas.
+   completarlo (ver *Configuración*).
 2. Con la placa conectada por USB:
 
    ```
@@ -140,26 +156,49 @@ línea de comandos.
    pio device monitor
    ```
 
-   La primera compilación baja las herramientas del C3 (~200 MB) y tarda.
+   La primera compilación baja las herramientas del C3 (~200 MB) y la librería
+   PubSubClient, y tarda.
 
-El monitor serie muestra una línea por envío:
+El monitor serie muestra una línea por minuto:
 
 ```
-WiFi: conectado, IP 192.168.137.45, RSSI -47 dBm
-== publica: mediana 48.7 cm (20/20 con eco)  -> 201 aceptada
+WiFi: conectado, IP 192.168.0.45, RSSI -47 dBm
+MQTT: conectando a xxxx.s1.eu.hivemq.cloud:8883 como "amartya-huergo_prueba"...
+MQTT: conectado.
+== mediana 48.9 cm = 87.4% (240/240 con eco)  -> sensores/huergo_prueba/nivel 87.4
 ```
+
+La primera publicación sale **un minuto después de arrancar**, no enseguida:
+es lo que tarda en llenarse la primera ventana de mediciones.
 
 **Para flashear, el monitor tiene que estar cerrado**, con Ctrl+C: el puerto lo
 usa un solo programa a la vez, y cerrar la pestaña de la terminal a veces deja el
 monitor andando por detrás.
 
+### La tabla de particiones
+
+`partitions.csv` reemplaza la tabla por defecto: saca la partición `spiffs`
+(que no se usa), agranda las dos apps de OTA y reserva **una partición
+`buffer` de 512 KB que hoy nadie usa**. Está pensada para guardar lecturas
+mientras no haya enlace y reenviarlas después. Esa parte del firmware todavía
+no existe, porque solo sirve si quien recibe acepta lecturas reenviadas con su
+hora original.
+
+Se declara desde ahora porque **la tabla de particiones no se cambia por OTA**,
+solo por cable. Así, el día que se escriba ese código, alcanza con una
+actualización remota.
+
+`pio run -t upload` graba la tabla en cada flasheo, así que una placa que venía
+con la tabla por defecto queda con la nueva sin hacer nada aparte.
+
 ### Qué se puede ajustar
 
-Todo está en `src/pipeline_http.ino`, comentado:
+En `src/pipeline_mqtt.ino`, comentado:
 
 | constante | hoy | qué es |
 |---|---|---|
-| `CICLO_MS` | 5000 | cada cuánto publica. 5 s es para pruebas; en operación alcanza con 1 por minuto o menos |
+| `PUBLICAR_JSON` | `false` | el nivel como texto en `/nivel`, o un JSON con todo en `/lectura` (ver arriba) |
+| `CICLO_MS` | 60000 | cada cuánto publica. 5000 para ver moverse el dato en el banco |
 | `PERIODO_DISPARO_MS` | 250 | cada cuánto dispara el sensor. No menos de 100: el eco anterior tiene que apagarse |
 | `IMPRIMIR_CADA_DISPARO` | `false` | en `true` (con el período en 100), el monitor muestra cada disparo en vivo |
 | `TEMPERATURA_AIRE_C` | 20 | temperatura supuesta para la velocidad del sonido. De 0 a 30 °C la distancia cambia un 5,5 % |
@@ -168,14 +207,16 @@ Todo está en `src/pipeline_http.ino`, comentado:
 
 | en el monitor | causa probable |
 |---|---|
-| en blanco | esperar 5 s (hay una línea por envío). Si sigue en blanco, desenchufar y volver a enchufar la placa con el monitor abierto |
+| en blanco | esperar un minuto (hay una línea por publicación). Si sigue en blanco, desenchufar y volver a enchufar la placa con el monitor abierto |
 | `WiFi: no conecto` | red de 5 GHz, contraseña equivocada, o el router lejos |
-| `sin respuesta (connection refused)` | `API_URL` equivocada, o el servidor apagado |
-| `sin respuesta (read Timeout)` | un firewall del lado del servidor |
-| `401` o `403` | `API_TOKEN` no es el que espera el servidor |
-| `sin eco -> valid:false` | el cableado de Echo, R27, o nada delante del sensor |
-| pocos ecos con el sensor quieto (`8/20 con eco`) | el divisor da menos de 3,3 V (dos resistencias iguales), o la superficie es irregular o inclinada |
-| siempre ~20 cm | hay algo a menos de 25 cm: zona ciega |
+| `MQTT: no conecto (-2: ...)` con un renglón `TLS:` | el host o el puerto, o el certificado: el broker no usa la raíz de Let's Encrypt, o el reloj todavía no tiene hora |
+| `MQTT: no conecto (-2: ...)` sin `TLS:` y con `MQTT_TLS` en 0 | el broker local apagado, o un firewall |
+| `MQTT: no conecto (4: ...)` | usuario o contraseña del broker |
+| `MQTT: no conecto (5: ...)` | el usuario existe pero no tiene permiso para conectarse |
+| se conecta, publica y se desconecta enseguida | el usuario no tiene permiso para publicar en ese tópico: revisar `SITIO` contra lo que habilitó el broker |
+| `sin eco` | el cableado de Echo, R27, o nada delante del sensor |
+| pocos ecos con el sensor quieto (`80/240 con eco`) | el divisor da menos de 3,3 V (dos resistencias iguales), o la superficie es irregular o inclinada |
+| `ZONA CIEGA` | hay algo a menos de 25 cm de la sonda |
 
 ## Medido con el sensor real
 
@@ -188,10 +229,8 @@ Todo está en `src/pipeline_http.ino`, comentado:
 
 ## Pendiente
 
-- Acordar con UMA NET el transporte (HTTP, HTTPS o MQTT) y el ritmo de
-  publicación.
-- **HTTPS.** Hoy habla HTTP plano, así que el token viaja sin cifrar. Sirve en
-  una red local; por internet hace falta TLS, y probablemente más de 1,5 s de
-  espera, porque un ESP32 tarda en negociarlo.
-- Un buffer para los cortes de WiFi, si el acuerdo lo pide.
+- Probar contra el broker real: hace falta el host y las credenciales (el
+  sitio de prueba es `huergo_prueba`).
+- Medir el tanque y cargar la calibración.
 - Compensar la temperatura con un sensor de verdad, en vez de suponer 20 °C.
+- Batería, panel y enlace para sitios sin WiFi (otra iteración).

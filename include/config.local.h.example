@@ -1,21 +1,35 @@
 // Copiar este archivo a config.local.h (en esta misma carpeta) y completarlo.
-// config.local.h está en el .gitignore: tiene la contraseña del WiFi y el token
-// del servidor, y no puede terminar en el repo.
+// config.local.h está en el .gitignore: tiene la contraseña del WiFi y la del
+// broker, y no puede terminar en el repo.
 #pragma once
 
-// La red WiFi. El C3 solo habla 2,4 GHz: si el router tiene las dos bandas con
-// el mismo nombre suele andar igual, pero una red solo de 5 GHz no la ve nunca.
+// La red WiFi del lugar. El C3 solo habla 2,4 GHz: si el router tiene las dos
+// bandas con el mismo nombre suele andar igual, pero una red solo de 5 GHz no
+// la ve nunca.
 #define WIFI_SSID "nombre-de-la-red"
 #define WIFI_PASS "contraseña"
 
-// A dónde se manda cada lectura (un POST con el JSON). Si el servidor está en
-// una PC de la misma red, va su IP: NO sirve 127.0.0.1 ni localhost, que desde
-// el ESP32 son el propio ESP32. Ojo si la placa se conecta al hotspot de la PC:
-// ahí la PC suele ser 192.168.137.1 y no la IP que tiene en la red de la casa.
-#define API_URL "http://192.168.0.10:8000/api/lectura"
+// El broker MQTT. Para UMA NET es un cluster de HiveMQ Cloud: puerto 8883, con
+// TLS. Para probar en casa contra un Mosquitto local sin cifrar: la IP de la
+// PC, puerto 1883 y MQTT_TLS en 0.
+#define MQTT_HOST "xxxxxxxxxxxxxxxx.s1.eu.hivemq.cloud"
+#define MQTT_PORT 8883
+#define MQTT_TLS  1
 
-// El token que espera el servidor. Viaja como "Authorization: Bearer <token>".
-#define API_TOKEN "pegar-el-token-aca"
+// Usuario y contraseña del broker. Los da quien administra el broker.
+#define MQTT_USER "usuario"
+#define MQTT_PASS "contraseña"
 
-// Cómo se identifica este nodo. Va en cada lectura como `node_id`.
-#define NODE_ID "cisterna-1"
+// El sitio. Va en el tópico (sensores/<SITIO>/...) y es lo que identifica a
+// este nodo: sin espacios, acentos ni barras. Para las pruebas UMA NET pidió
+// "huergo_prueba"; el del montaje lo definen ellos.
+#define SITIO "huergo_prueba"
+
+// Calibración del tanque, en cm, medidas desde la CARA del sensor:
+//   DIST_FONDO_CM: hasta el fondo (tanque vacío)
+//   DIST_LLENO_CM: hasta el agua con el tanque lleno
+// Con estas dos el nodo calcula el porcentaje. Son de ESTE tanque: cambiar de
+// tanque es cambiarlas y volver a flashear. DIST_LLENO_CM no puede ser menor
+// que 25 (la zona ciega del sensor): si lo es, no compila.
+#define DIST_FONDO_CM 180.0f
+#define DIST_LLENO_CM 30.0f

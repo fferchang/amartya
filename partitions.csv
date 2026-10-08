@@ -1,0 +1,43 @@
+# Tabla de particiones del flash de 4 MB del ESP32-C3.
+#
+# OJO: este archivo va SIN ACENTOS a proposito. PlatformIO lo lee con la
+# codificacion por defecto del sistema, que en Windows es cp1252, y con una
+# tilde en UTF-8 la compilacion se cae con un UnicodeDecodeError.
+#
+# Es la tabla por defecto del core de Arduino con UN cambio: la particion
+# `spiffs` (1,375 MB que este firmware no usa) se reparte entre las dos apps y
+# una particion `buffer` para guardar lecturas cuando no hay enlace.
+#
+# POR QUE SE DECLARA YA, AUNQUE TODAVIA NADIE ESCRIBA EN ELLA: la tabla de
+# particiones no se puede cambiar por OTA, solo flasheando por cable. Con el
+# nodo ya montado en el sitio, agregarla despues obligaria a ir hasta alla con
+# una laptop. Declararla hoy no cambia nada de lo que corre.
+#
+# El codigo que la usa (un ring de registros con su tick monotono) se escribe
+# cuando se confirme que quien recibe acepta lecturas reenviadas CON su hora:
+# si la hora la pone el servidor al recibir, reenviar un buffer aplasta toda la
+# historia guardada en el momento de la descarga.
+#
+# Tamanos:
+#   - app0/app1: 1,6875 MB cada una. Dos porque OTA escribe la version nueva en
+#     la que no esta corriendo; en un nodo remoto eso vale mas que el lugar. La
+#     app ocupa hoy ~875 KB, asi que queda margen para crecer.
+#   - buffer: 512 KB. A 16 bytes por registro y una lectura cada 15 minutos
+#     mientras no hay enlace, dos meses son ~92 KB; sobra para cambiar de idea
+#     sobre la cadencia (a 1 por minuto entran ~23 dias).
+#   - coredump: igual que en la tabla por defecto, para poder leer un cuelgue.
+#
+# Las apps tienen que empezar alineadas a 64 KB (0x10000); las de datos, a
+# 4 KB, que es el tamano de un sector borrable. Todo termina justo en 0x400000.
+#
+# El subtipo 0x40 es el primero del rango que ESP-IDF reserva para particiones
+# de datos propias (0x40-0xFE). El firmware la va a buscar por nombre con
+# esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40, "buffer").
+#
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x1B0000,
+app1,     app,  ota_1,    0x1C0000, 0x1B0000,
+buffer,   data, 0x40,     0x370000, 0x80000,
+coredump, data, coredump, 0x3F0000, 0x10000,
