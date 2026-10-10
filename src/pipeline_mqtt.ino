@@ -69,8 +69,14 @@ static const float TEMPERATURA_AIRE_C = 20.0f;
 static const uint32_t PERIODO_DISPARO_MS = 250;
 
 // Imprimir cada disparo en el monitor serie, o solo la línea de cada
-// publicación. Prenderlo (con el período en 100) para mirar el sensor en vivo.
-static const bool IMPRIMIR_CADA_DISPARO = false;
+// publicación. PRENDIDO para la instalación: al apuntar la sonda y calibrar se
+// ve la distancia en vivo, cuatro veces por segundo, y se compara con la cinta.
+//
+// Dejarlo prendido sin una PC enchufada no cuesta nada: sin nadie del otro lado
+// del USB, el core descarta lo que no puede mandar en vez de esperar (ver
+// HWCDC::write, que con la PC ausente solo vacía su buffer), así que el loop no
+// se frena. Para mirar el sensor más fino, bajar PERIODO_DISPARO_MS a 100.
+static const bool IMPRIMIR_CADA_DISPARO = true;
 
 // Cada cuánto se PUBLICA: 1 por minuto, el ritmo de UMA NET. El nivel de una
 // cisterna no cambia en segundos. Para ver moverse el dato con la mano en el
@@ -86,6 +92,43 @@ static const uint8_t MAX_DISPAROS_POR_VENTANA = 64;
 // mediana() recorre el arreglo con un índice int8_t, que llega hasta 127. Si
 // alguien sube el tope por encima de eso, que falle al compilar y no en silencio.
 static_assert(MAX_DISPAROS_POR_VENTANA <= 127, "mediana() usa int8_t como indice");
+
+// La PRIMERA publicación sale apenas la ventana juntó sus disparos (64 × 250 ms
+// = 16 s), y no a un CICLO_MS de arrancar: no hay por qué esperar un minuto
+// entero para ver el primer dato, y lo que se publica es la misma mediana que
+// cualquier otra. De ahí en más, cada CICLO_MS. Si CICLO_MS es más corto (5 s
+// en el banco), manda el más corto.
+static const uint32_t PRIMERA_PUBLICACION_MS =
+    MAX_DISPAROS_POR_VENTANA * PERIODO_DISPARO_MS < CICLO_MS
+        ? MAX_DISPAROS_POR_VENTANA * PERIODO_DISPARO_MS
+        : CICLO_MS;
+
+// --- Topes de espera de la red ---
+// Cuánto se espera a que el WiFi se asocie. Si no conecta, se sigue y el
+// próximo ciclo reintenta: sin tope, un router apagado colgaría el loop.
+static const uint32_t ESPERA_WIFI_MS = 15000;
+
+// Topes de cada paso de la conexión al broker. Los defaults del core son 30 s
+// para abrir la conexión TCP y 120 s para el handshake TLS, más 15 s de
+// PubSubClient esperando la respuesta del broker: un solo intento trabado
+// paraba el loop hasta 165 s, o sea dos publicaciones perdidas. Y como el reloj
+// del ciclo se toma ANTES de conectar, el ciclo siguiente se disparaba enseguida
+// con la ventana vacía y el log decía "sin eco (0/0)": una falla de sensor que
+// no existía.
+//
+// Con estos, el peor caso de un ciclo que tiene que reconectar todo es WiFi 15 +
+// DNS ~15 (lo fija el core, no se puede bajar) + TCP 5 + TLS 15 + MQTT 5 = 55 s,
+// menos que CICLO_MS, así que la publicación siguiente sale a tiempo. TLS cuenta
+// 15 y no 10 porque, abierta la conexión, cada lectura dentro del handshake
+// puede esperar hasta TOPE_TCP_S, y el tope del handshake se revisa recién entre
+// lectura y lectura. Un handshake sano tarda pocos segundos: 10 es margen de sobra.
+//
+// OJO CON LAS UNIDADES: los tres van en SEGUNDOS. setTimeout() de un Stream
+// común es en milisegundos, pero WiFiClientSecure lo redefine en segundos: un
+// 5000 acá serían 83 minutos.
+static const uint32_t TOPE_TCP_S  = 5;
+static const uint32_t TOPE_TLS_S  = 10;
+static const uint16_t TOPE_MQTT_S = 5;
 
 // Por debajo de esto el JSN-SR04T está en su zona ciega: no dice "sin eco",
 // devuelve un número fijo cerca de 20 cm que parece una medición normal.
@@ -106,8 +149,14 @@ enum class Estado { Ok, SinEco, ZonaCiega };
 
 #if MQTT_TLS
 // El certificado raíz con el que se valida al broker: ISRG Root X1, la raíz de
-// Let's Encrypt, que es la que usa HiveMQ Cloud. Es PÚBLICO (viene en cualquier
-// navegador), por eso puede ir en el código. Vence en 2035.
+// Let's Encrypt. Es PÚBLICO (viene en cualquier navegador), por eso puede ir en
+// el código. Vence en 2035.
+//
+// Verificado contra el broker el 09/10/2026: la cadena es *.s1.eu.hivemq.cloud
+// -> YR1 -> Root YR, la jerarquía nueva de Let's Encrypt, y el broker manda Root
+// YR firmada por ISRG Root X1. Esa firma cruzada es lo que hace que esta raíz
+// alcance. Si Let's Encrypt la deja de mandar en alguna renovación, el TLS va a
+// fallar y hay que sumar acá el PEM de Root YR, debajo de este.
 //
 // Sin esto el TLS cifra pero no verifica CON QUIÉN habla, y la contraseña del
 // broker se le podría entregar a cualquiera que se haga pasar por él.
@@ -154,6 +203,10 @@ static PubSubClient mqtt(red);
 
 static uint32_t ultimoEnvio = 0;
 static uint32_t ultimoDisparo = 0;
+
+// Cuánto esperar desde ultimoEnvio hasta publicar: PRIMERA_PUBLICACION_MS la
+// primera vez, CICLO_MS de ahí en más (loop() la cambia al publicar).
+static uint32_t esperaEnvio = PRIMERA_PUBLICACION_MS;
 
 // Los disparos CON ECO de la ventana actual, como anillo: el que llega cuando
 // está lleno pisa al más viejo (ver MAX_DISPAROS_POR_VENTANA). Los contadores
@@ -270,10 +323,9 @@ static bool asegurarWifi() {
   // si conecta sin esto, se puede sacar y ganar alcance.
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
 
-  // Espera acotada: si no conecta en 15 s se sigue, y el próximo ciclo
-  // reintenta. Sin tope, un router apagado colgaría el loop para siempre.
+  // Espera acotada (ver ESPERA_WIFI_MS).
   uint32_t inicio = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - inicio < 15000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - inicio < ESPERA_WIFI_MS) {
     delay(250);
   }
   if (WiFi.status() != WL_CONNECTED) {
@@ -283,12 +335,14 @@ static bool asegurarWifi() {
   Serial.printf("WiFi: conectado, IP %s, RSSI %d dBm\n",
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-  // La hora ya NO viaja en el dato (la pone quien recibe), pero se sigue
-  // pidiendo por el TLS: según cómo esté compilado mbedTLS, un reloj en 1970
-  // hace que el certificado del broker parezca "todavía no válido". No está
-  // confirmado que este core lo verifique; pedirla cuesta un paquete UDP y
-  // saca la duda. configTime() no bloquea, y como la primera publicación es
-  // recién a un CICLO_MS de arrancar, para entonces ya sincronizó.
+  // La hora NO viaja en el dato (la pone quien recibe), y hoy el TLS tampoco la
+  // usa: el core instalado compila mbedTLS sin MBEDTLS_HAVE_TIME_DATE (se ve en
+  // su sdkconfig del C3), así que no mira las fechas del certificado. Se sigue
+  // pidiendo como seguro contra una actualización del core que lo prenda: con
+  // el reloj en 1970 el certificado del broker parecería "todavía no válido" y
+  // el nodo no conectaría nunca. Cuesta un paquete UDP y configTime() no
+  // bloquea. Si eso llegara a pasar, fallaría el primer intento (el de setup,
+  // antes de sincronizar) y el del ciclo siguiente ya tendría hora.
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   return true;
 }
@@ -394,15 +448,32 @@ void setup() {
 
 #if MQTT_TLS
   red.setCACert(CA_RAIZ);
+  // Los topes de espera (ver TOPE_TCP_S). Los dos en SEGUNDOS. setTimeout()
+  // vale para abrir la conexión y para cada lectura y escritura después.
+  red.setTimeout(TOPE_TCP_S);
+  red.setHandshakeTimeout(TOPE_TLS_S);
 #endif
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt.setSocketTimeout(TOPE_MQTT_S);
 
   Serial.println();
   Serial.println("=== Nodo de nivel JSN-SR04T (MQTT) ===");
-  Serial.printf("sitio \"%s\" -> %s:%d %s | publica cada %lu s | calibracion fondo %.0f cm, lleno %.0f cm\n",
+  Serial.printf("sitio \"%s\" -> %s:%d %s | primera publicacion a los %lu s, despues cada %lu s | calibracion fondo %.0f cm, lleno %.0f cm\n",
                 SITIO, MQTT_HOST, MQTT_PORT, MQTT_TLS ? "TLS" : "SIN TLS",
-                CICLO_MS / 1000, DIST_FONDO_CM, DIST_LLENO_CM);
-  asegurarWifi();
+                PRIMERA_PUBLICACION_MS / 1000, CICLO_MS / 1000, DIST_FONDO_CM, DIST_LLENO_CM);
+
+  // Al broker se conecta YA, y no recién en la primera publicación: si el host,
+  // la contraseña o el certificado están mal, el monitor lo dice a los pocos
+  // segundos de enchufar. Si falla, no pasa nada más: cada publicación vuelve a
+  // intentar.
+  if (asegurarWifi()) {
+    asegurarMqtt();
+  }
+
+  // La cuenta hasta la primera publicación arranca ACÁ y no en el boot: los
+  // disparos empiezan recién en loop(), y conectar puede haber tardado decenas
+  // de segundos. Contando desde el boot, la primera ventana podría salir vacía.
+  ultimoEnvio = millis();
 }
 
 void loop() {
@@ -433,11 +504,12 @@ void loop() {
     }
   }
 
-  // --- Publicación: cada CICLO_MS ---
-  if (millis() - ultimoEnvio < CICLO_MS) {
+  // --- Publicación: la primera a PRIMERA_PUBLICACION_MS, después cada CICLO_MS ---
+  if (millis() - ultimoEnvio < esperaEnvio) {
     return;
   }
   ultimoEnvio = millis();
+  esperaEnvio = CICLO_MS;
 
   // Lo guardado es como mucho el tope del anillo, aunque hayan llegado más.
   uint8_t guardados = conEco < MAX_DISPAROS_POR_VENTANA ? conEco : MAX_DISPAROS_POR_VENTANA;

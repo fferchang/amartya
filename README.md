@@ -83,7 +83,10 @@ recibe.
 ## Configuración
 
 Todo lo de cada instalación está en `include/config.local.h` (se copia de
-`config.local.h.example`, y está en el `.gitignore` porque tiene contraseñas):
+`config.local.h.example`, y está en el `.gitignore` porque tiene contraseñas).
+**Ese archivo no se sube nunca a ningún repo**, y tampoco se comparte el
+`.bin` compilado (`.pio/build/`): lleva las contraseñas adentro, en texto
+plano.
 
 | constante | qué es |
 |---|---|
@@ -95,9 +98,12 @@ Todo lo de cada instalación está en `include/config.local.h` (se copia de
 | `DIST_FONDO_CM`, `DIST_LLENO_CM` | la calibración del tanque, en cm. Si `DIST_LLENO_CM` es menor que 25, no compila |
 
 El certificado con el que se valida al broker (ISRG Root X1, la raíz de Let's
-Encrypt, que usa HiveMQ Cloud) va en el código: es público y vence en 2035. Si
-el broker usara otra raíz, la conexión falla con un error de TLS en el monitor
-(ver *Si algo no anda*).
+Encrypt) va en el código: es público y vence en 2035. Verificado contra el
+broker: HiveMQ Cloud usa la jerarquía nueva de Let's Encrypt (YR1 → Root YR) y
+manda Root YR firmada por ISRG Root X1, que es lo que hace que esta raíz
+alcance. Si en una renovación dejara de mandar esa firma, la conexión falla con
+un error de TLS en el monitor (ver *Si algo no anda*) y hay que sumar Root YR
+en el código.
 
 ## Hardware
 
@@ -159,17 +165,24 @@ línea de comandos.
    La primera compilación baja las herramientas del C3 (~200 MB) y la librería
    PubSubClient, y tarda.
 
-El monitor serie muestra una línea por minuto:
+El monitor serie muestra cada disparo (cuatro por segundo) y, una vez por
+minuto, la línea de la publicación:
 
 ```
 WiFi: conectado, IP 192.168.0.45, RSSI -47 dBm
 MQTT: conectando a xxxx.s1.eu.hivemq.cloud:8883 como "amartya-huergo_prueba"...
 MQTT: conectado.
-== mediana 48.9 cm = 87.4% (240/240 con eco)  -> sensores/huergo_prueba/nivel 87.4
+    48.9 cm
+    49.1 cm
+  sin eco
+    48.9 cm
+== mediana 48.9 cm = 87.4% (63/64 con eco)  -> sensores/huergo_prueba/nivel 87.4
 ```
 
-La primera publicación sale **un minuto después de arrancar**, no enseguida:
-es lo que tarda en llenarse la primera ventana de mediciones.
+El nodo se conecta al broker **apenas arranca**, así que un error de
+contraseña o de certificado aparece en el monitor a los pocos segundos. La
+primera publicación sale **16 s después** (lo que tarda en llenarse la
+primera ventana de mediciones) y de ahí en más, una por minuto.
 
 **Para flashear, el monitor tiene que estar cerrado**, con Ctrl+C: el puerto lo
 usa un solo programa a la vez, y cerrar la pestaña de la terminal a veces deja el
@@ -200,14 +213,15 @@ En `src/pipeline_mqtt.ino`, comentado:
 | `PUBLICAR_JSON` | `false` | el nivel como texto en `/nivel`, o un JSON con todo en `/lectura` (ver arriba) |
 | `CICLO_MS` | 60000 | cada cuánto publica. 5000 para ver moverse el dato en el banco |
 | `PERIODO_DISPARO_MS` | 250 | cada cuánto dispara el sensor. No menos de 100: el eco anterior tiene que apagarse |
-| `IMPRIMIR_CADA_DISPARO` | `false` | en `true` (con el período en 100), el monitor muestra cada disparo en vivo |
+| `IMPRIMIR_CADA_DISPARO` | `true` | el monitor muestra cada disparo en vivo, para apuntar la sonda y calibrar. Sin una PC enchufada no frena nada. En `false`, solo la línea de cada publicación |
 | `TEMPERATURA_AIRE_C` | 20 | temperatura supuesta para la velocidad del sonido. De 0 a 30 °C la distancia cambia un 5,5 % |
+| `TOPE_TCP_S`, `TOPE_TLS_S`, `TOPE_MQTT_S` | 5, 10, 5 | cuánto se espera, **en segundos**, cada paso de la conexión al broker. Están elegidos para que una reconexión, en el peor caso, tarde menos que `CICLO_MS` y no se pierda la publicación siguiente |
 
 ## Si algo no anda
 
 | en el monitor | causa probable |
 |---|---|
-| en blanco | esperar un minuto (hay una línea por publicación). Si sigue en blanco, desenchufar y volver a enchufar la placa con el monitor abierto |
+| en blanco | con `IMPRIMIR_CADA_DISPARO` prendido aparecen cuatro líneas por segundo, así que un monitor quieto es que no está leyendo: desenchufar y volver a enchufar la placa con el monitor abierto |
 | `WiFi: no conecto` | red de 5 GHz, contraseña equivocada, o el router lejos |
 | `MQTT: no conecto (-2: ...)` con un renglón `TLS:` | el host o el puerto, o el certificado: el broker no usa la raíz de Let's Encrypt, o el reloj todavía no tiene hora |
 | `MQTT: no conecto (-2: ...)` sin `TLS:` y con `MQTT_TLS` en 0 | el broker local apagado, o un firewall |
@@ -229,8 +243,8 @@ En `src/pipeline_mqtt.ino`, comentado:
 
 ## Pendiente
 
-- Probar contra el broker real: hace falta el host y las credenciales (el
-  sitio de prueba es `huergo_prueba`).
+- Prueba de punta a punta junto con UMA NET (ya probado en placa contra el
+  broker real con el sitio `huergo_prueba`: el dato llega a su tablero).
 - Medir el tanque y cargar la calibración.
 - Compensar la temperatura con un sensor de verdad, en vez de suponer 20 °C.
 - Batería, panel y enlace para sitios sin WiFi (otra iteración).
